@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Lightbulb, Send, TrendingUp, CheckCircle, Clock, XCircle, Filter, ThumbsUp, BarChart3 } from "lucide-react";
+import { Lightbulb, Send, TrendingUp, CheckCircle, Clock, XCircle, Filter, ThumbsUp, BarChart3, Brain } from "lucide-react";
 
 export default function SuggestionsPage() {
   const [newSuggestion, setNewSuggestion] = useState("");

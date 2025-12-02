@@ -59,6 +59,13 @@ export async function GET(request: NextRequest) {
     }
 
     // Récupérer tous les messages de l'utilisateur
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'userId is required' },
+        { status: 400 }
+      );
+    }
+    
     const messages = await db
       .collection<Message>(Collections.MESSAGES)
       .find({

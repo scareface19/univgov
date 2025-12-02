@@ -227,44 +227,6 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// GET /gpa - Calculer uniquement le GPA
-export async function GET_GPA(request: NextRequest) {
-  try {
-    const searchParams = request.nextUrl.searchParams;
-    const studentId = searchParams.get('studentId');
-
-    if (!studentId) {
-      return NextResponse.json(
-        { error: 'studentId is required' },
-        { status: 400 }
-      );
-    }
-
-    const db = await getDb();
-    const grades = await db
-      .collection<Grade>(Collections.GRADES)
-      .find({ studentId })
-      .toArray();
-
-    const gpa = calculateGPA(grades);
-    const totalCredits = grades.reduce((sum, g) => sum + g.credits, 0);
-    const earnedCredits = grades
-      .filter(g => g.letterGrade !== 'F')
-      .reduce((sum, g) => sum + g.credits, 0);
-
-    return NextResponse.json({
-      studentId,
-      gpa: Number(gpa.toFixed(2)),
-      totalCredits,
-      earnedCredits,
-      totalCourses: grades.length,
-    });
-  } catch (error) {
-    console.error('Error calculating GPA:', error);
-    return NextResponse.json(
-      { error: 'Failed to calculate GPA' },
-      { status: 500 }
-    );
-  }
-}
+// Note: GET_GPA functionality is available via GET with ?summary=true&studentId=...
+// This was removed as Next.js routes only support GET, POST, PUT, DELETE, PATCH
 

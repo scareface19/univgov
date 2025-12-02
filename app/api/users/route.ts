@@ -9,7 +9,7 @@ export async function GET(request: NextRequest) {
     const role = searchParams.get('role');
 
     const db = await getDb();
-    const query = role ? { role } : {};
+    const query: any = role ? { role: role as User['role'] } : {};
     
     const users = await db
       .collection<User>(Collections.USERS)

@@ -4,7 +4,7 @@ const nextConfig = {
     ignoreDuringBuilds: true,
   },
   typescript: {
-    ignoreBuildErrors: true,
+    ignoreBuildErrors: false, // Activer pour voir les vraies erreurs
   },
   // Désactiver le service worker en développement pour éviter les erreurs
   async headers() {
@@ -19,6 +19,16 @@ const nextConfig = {
         ],
       },
     ];
+  },
+  // S'assurer que les chemins sont résolus correctement
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        fs: false,
+      };
+    }
+    return config;
   },
 };
 

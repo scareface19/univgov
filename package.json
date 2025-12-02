@@ -11,7 +11,8 @@
     "create-demo": "node scripts/create-demo.js",
     "verify-demo": "node scripts/verify-demo.js",
     "test-demo-auth": "node scripts/test-demo-auth.js",
-    "test-auth": "node scripts/test-auth.js"
+    "test-auth": "node scripts/test-auth.js",
+    "generate-env": "node scripts/generate-env.js"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.0.5",

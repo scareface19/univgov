@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Collections } from '@/lib/mongodb';
-import { Grade, StudentGradeSummary } from '@/lib/types';
-import { ObjectId } from 'mongodb';
+import { getDb } from '@/lib/db';
 
 // Helper function to calculate letter grade
 function calculateLetterGrade(grade: number): string {
@@ -13,24 +11,24 @@ function calculateLetterGrade(grade: number): string {
 }
 
 // Helper function to calculate GPA
-function calculateGPA(grades: Grade[]): number {
+function calculateGPA(grades: any[]): number {
   if (grades.length === 0) return 0;
-  
+
   const gradePoints: Record<string, number> = {
-    'A': 4.0,
-    'B': 3.0,
-    'C': 2.0,
-    'D': 1.0,
-    'F': 0.0,
+    A: 4.0,
+    B: 3.0,
+    C: 2.0,
+    D: 1.0,
+    F: 0.0,
   };
 
   let totalPoints = 0;
   let totalCredits = 0;
 
-  grades.forEach(grade => {
-    const points = gradePoints[grade.letterGrade] || 0;
-    totalPoints += points * grade.credits;
-    totalCredits += grade.credits;
+  grades.forEach((grade) => {
+    const points = gradePoints[grade.letterGrade] ?? 0;
+    totalPoints += points * (grade.credits || 0);
+    totalCredits += grade.credits || 0;
   });
 
   return totalCredits > 0 ? totalPoints / totalCredits : 0;
@@ -43,64 +41,73 @@ export async function GET(request: NextRequest) {
     const studentId = searchParams.get('studentId');
     const courseId = searchParams.get('courseId');
     const semester = searchParams.get('semester');
-    const summary = searchParams.get('summary'); // 'true' pour résumé complet avec GPA
+    const summaryParam = searchParams.get('summary');
 
-    const db = await getDb();
-    const query: any = {};
-    
-    if (studentId) query.studentId = studentId;
-    if (courseId) query.courseId = courseId;
-    if (semester) query.semester = semester;
+    const db = getDb();
 
-    const grades = await db
-      .collection<Grade>(Collections.GRADES)
-      .find(query)
-      .sort({ examDate: -1 })
-      .toArray();
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+
+    if (studentId) {
+      conditions.push('studentId = ?');
+      params.push(parseInt(studentId, 10));
+    }
+    if (courseId) {
+      conditions.push('courseId = ?');
+      params.push(parseInt(courseId, 10));
+    }
+    if (semester) {
+      conditions.push('semester = ?');
+      params.push(semester);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const grades = db
+      .prepare(`SELECT * FROM grades ${where} ORDER BY examDate DESC`)
+      .all(...params) as any[];
 
     // Si summary=true, calculer le résumé complet
-    if (summary === 'true' && studentId) {
-      // Calculer GPA total
-      const allGrades = await db
-        .collection<Grade>(Collections.GRADES)
-        .find({ studentId })
-        .toArray();
+    if (summaryParam === 'true' && studentId) {
+      const allGrades = db
+        .prepare('SELECT * FROM grades WHERE studentId = ?')
+        .all(parseInt(studentId, 10)) as any[];
 
       const totalGPA = calculateGPA(allGrades);
-      
-      // Calculer crédits
-      const totalCredits = allGrades.reduce((sum, g) => sum + g.credits, 0);
+      const totalCredits = allGrades.reduce((sum, g) => sum + (g.credits || 0), 0);
       const earnedCredits = allGrades
-        .filter(g => g.letterGrade !== 'F')
-        .reduce((sum, g) => sum + g.credits, 0);
+        .filter((g) => g.letterGrade !== 'F')
+        .reduce((sum, g) => sum + (g.credits || 0), 0);
 
-      // Grouper par semestre
-      const semesterMap = new Map<string, Grade[]>();
-      allGrades.forEach(grade => {
+      // Grouper par semestre en préservant academicYear et semester directement
+      const semesterMap = new Map<string, { academicYear: string; semester: string; courses: any[] }>();
+      allGrades.forEach((grade) => {
         const key = `${grade.academicYear}-${grade.semester}`;
         if (!semesterMap.has(key)) {
-          semesterMap.set(key, []);
+          semesterMap.set(key, {
+            academicYear: grade.academicYear,
+            semester: grade.semester,
+            courses: [],
+          });
         }
-        semesterMap.get(key)!.push(grade);
+        semesterMap.get(key)!.courses.push(grade);
       });
 
-      const semesters = Array.from(semesterMap.entries()).map(([key, courses]) => {
-        const [academicYear, sem] = key.split('-');
-        return {
+      const semesters = Array.from(semesterMap.values())
+        .map(({ academicYear, semester: sem, courses }) => ({
           semester: sem,
           academicYear,
           courses,
           semesterGPA: calculateGPA(courses),
-          credits: courses.reduce((sum, g) => sum + g.credits, 0),
-        };
-      }).sort((a, b) => {
-        if (a.academicYear !== b.academicYear) {
-          return b.academicYear.localeCompare(a.academicYear);
-        }
-        return b.semester.localeCompare(a.semester);
-      });
+          credits: courses.reduce((sum, g) => sum + (g.credits || 0), 0),
+        }))
+        .sort((a, b) => {
+          if (a.academicYear !== b.academicYear) {
+            return b.academicYear.localeCompare(a.academicYear);
+          }
+          return b.semester.localeCompare(a.semester);
+        });
 
-      const summary: StudentGradeSummary = {
+      const summary = {
         studentId,
         totalCredits,
         earnedCredits,
@@ -114,14 +121,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(grades);
   } catch (error) {
     console.error('Error fetching grades:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch grades' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch grades' }, { status: 500 });
   }
 }
 
-// POST - Ajouter ou modifier une note
+// POST - Ajouter ou modifier une note (upsert)
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -139,94 +143,101 @@ export async function POST(request: NextRequest) {
       examDate,
     } = body;
 
-    if (!studentId || !courseId || !grade || !credits) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
+    if (!studentId || !courseId || grade === undefined || grade === null || !credits) {
+      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
     if (grade < 0 || grade > 100) {
       return NextResponse.json(
         { error: 'Grade must be between 0 and 100' },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    const db = await getDb();
+    const db = getDb();
 
-    // Vérifier si la note existe déjà
-    const existingGrade = await db
-      .collection<Grade>(Collections.GRADES)
-      .findOne({ studentId, courseId, semester });
-
+    const studentIdInt = parseInt(studentId, 10);
+    const courseIdInt = parseInt(courseId, 10);
     const letterGrade = calculateLetterGrade(grade);
+    const now = new Date().toISOString();
+    const resolvedSemester = semester || 'S1';
+    const resolvedAcademicYear =
+      academicYear || `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`;
+    const resolvedExamDate = examDate ? new Date(examDate).toISOString() : now;
 
-    const gradeData: Grade = {
-      studentId,
-      courseId,
-      courseCode: courseCode || '',
-      courseName: courseName || '',
-      semester: semester || 'S1',
-      academicYear: academicYear || `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`,
-      grade,
-      letterGrade,
-      credits,
-      professorId: professorId || '',
-      professorName: professorName || 'Prof',
-      examDate: examDate ? new Date(examDate) : new Date(),
-      createdAt: existingGrade?.createdAt || new Date(),
-      updatedAt: new Date(),
-    };
+    const existing = db
+      .prepare('SELECT id, createdAt FROM grades WHERE studentId = ? AND courseId = ? AND semester = ?')
+      .get(studentIdInt, courseIdInt, resolvedSemester) as any;
 
-    if (existingGrade) {
+    if (existing) {
       // Mettre à jour la note existante
-      await db
-        .collection<Grade>(Collections.GRADES)
-        .updateOne(
-          { _id: existingGrade._id },
-          { $set: gradeData }
-        );
-      
-      const updated = await db
-        .collection<Grade>(Collections.GRADES)
-        .findOne({ _id: existingGrade._id });
+      db.prepare(`
+        UPDATE grades
+        SET courseCode=?, courseName=?, academicYear=?, grade=?, letterGrade=?,
+            credits=?, professorId=?, professorName=?, examDate=?, updatedAt=?
+        WHERE id=?
+      `).run(
+        courseCode || '',
+        courseName || '',
+        resolvedAcademicYear,
+        grade,
+        letterGrade,
+        credits,
+        professorId ? parseInt(professorId, 10) : null,
+        professorName || 'Prof',
+        resolvedExamDate,
+        now,
+        existing.id,
+      );
 
+      const updated = db.prepare('SELECT * FROM grades WHERE id = ?').get(existing.id) as any;
       return NextResponse.json({ success: true, grade: updated });
     } else {
       // Créer une nouvelle note
-      const result = await db
-        .collection<Grade>(Collections.GRADES)
-        .insertOne(gradeData);
+      db.prepare(`
+        INSERT INTO grades
+          (studentId, courseId, courseCode, courseName, semester, academicYear,
+           grade, letterGrade, credits, professorId, professorName, examDate,
+           createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        studentIdInt,
+        courseIdInt,
+        courseCode || '',
+        courseName || '',
+        resolvedSemester,
+        resolvedAcademicYear,
+        grade,
+        letterGrade,
+        credits,
+        professorId ? parseInt(professorId, 10) : null,
+        professorName || 'Prof',
+        resolvedExamDate,
+        now,
+        now,
+      );
 
       // Mettre à jour l'enrollment avec la note
-      await db
-        .collection(Collections.ENROLLMENTS)
-        .updateOne(
-          { studentId, courseId },
-          {
-            $set: {
-              grade,
-              status: grade >= 60 ? 'completed' : 'failed',
-              updatedAt: new Date(),
-            },
-          }
-        );
-
-      return NextResponse.json(
-        { success: true, grade: { ...gradeData, _id: result.insertedId } },
-        { status: 201 }
+      db.prepare(`
+        UPDATE enrollments
+        SET grade=?, status=?, updatedAt=?
+        WHERE studentId=? AND courseId=?
+      `).run(
+        grade,
+        grade >= 10 ? 'completed' : 'failed',
+        now,
+        studentIdInt,
+        courseIdInt,
       );
+
+      const created = db
+        .prepare('SELECT * FROM grades WHERE studentId=? AND courseId=? AND semester=?')
+        .get(studentIdInt, courseIdInt, resolvedSemester) as any;
+
+      return NextResponse.json({ success: true, grade: created }, { status: 201 });
     }
   } catch (error) {
     console.error('Error creating/updating grade:', error);
-    return NextResponse.json(
-      { error: 'Failed to create/update grade' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to create/update grade' }, { status: 500 });
   }
 }
-
-// Note: GET_GPA functionality is available via GET with ?summary=true&studentId=...
-// This was removed as Next.js routes only support GET, POST, PUT, DELETE, PATCH
-

@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Collections } from '@/lib/mongodb';
-import { Document } from '@/lib/types';
-import { ObjectId } from 'mongodb';
+import { getDb, parseJson } from '@/lib/db';
 
 // GET - Liste des documents avec filtres
 export async function GET(request: NextRequest) {
@@ -11,26 +9,38 @@ export async function GET(request: NextRequest) {
     const type = searchParams.get('type');
     const status = searchParams.get('status');
 
-    const db = await getDb();
-    const query: any = {};
-    
-    if (userId) query.userId = userId;
-    if (type) query.type = type;
-    if (status) query.status = status;
+    const db = getDb();
 
-    const documents = await db
-      .collection<Document>(Collections.DOCUMENTS)
-      .find(query)
-      .sort({ requestedDate: -1 })
-      .toArray();
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+
+    if (userId) {
+      conditions.push('userId = ?');
+      params.push(parseInt(userId, 10));
+    }
+    if (type) {
+      conditions.push('type = ?');
+      params.push(type);
+    }
+    if (status) {
+      conditions.push('status = ?');
+      params.push(status);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const rows = db
+      .prepare(`SELECT * FROM documents ${where} ORDER BY requestedDate DESC`)
+      .all(...params) as any[];
+
+    const documents = rows.map((row) => ({
+      ...row,
+      metadata: parseJson(row.metadata, {}),
+    }));
 
     return NextResponse.json(documents);
   } catch (error) {
     console.error('Error fetching documents:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch documents' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch documents' }, { status: 500 });
   }
 }
 
@@ -41,59 +51,58 @@ export async function POST(request: NextRequest) {
     const { userId, userName, type, title, titleAr, expiryDays } = body;
 
     if (!userId || !type || !title) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    const db = await getDb();
-    
-    // Générer un ID de document unique
-    const count = await db.collection(Collections.DOCUMENTS).countDocuments();
+    const db = getDb();
+
+    const { c: count } = db
+      .prepare('SELECT COUNT(*) as c FROM documents')
+      .get() as { c: number };
     const year = new Date().getFullYear();
     const documentId = `DOC-${year}-${String(count + 1).padStart(3, '0')}`;
 
     const typeArMap: Record<string, string> = {
-      'certificate': 'شهادة التسجيل',
-      'transcript': 'كشف النقاط',
-      'attestation': 'شهادة',
-      'other': 'وثيقة أخرى',
+      certificate: 'شهادة التسجيل',
+      transcript: 'كشف النقاط',
+      attestation: 'شهادة',
+      other: 'وثيقة أخرى',
     };
 
-    const newDocument: Document = {
-      documentId,
-      userId,
-      userName: userName || 'Utilisateur',
-      type,
-      typeAr: typeArMap[type] || 'وثيقة',
-      title,
-      titleAr: titleAr || title,
-      status: 'pending',
-      requestedDate: new Date(),
-      metadata: {},
-    };
-
+    const now = new Date().toISOString();
+    let expiryDate: string | null = null;
     if (expiryDays) {
-      const expiryDate = new Date();
-      expiryDate.setDate(expiryDate.getDate() + expiryDays);
-      newDocument.expiryDate = expiryDate;
+      const d = new Date();
+      d.setDate(d.getDate() + Number(expiryDays));
+      expiryDate = d.toISOString();
     }
 
-    const result = await db
-      .collection<Document>(Collections.DOCUMENTS)
-      .insertOne(newDocument);
-
-    return NextResponse.json(
-      { success: true, document: { ...newDocument, _id: result.insertedId } },
-      { status: 201 }
+    db.prepare(`
+      INSERT INTO documents
+        (documentId, userId, userName, type, typeAr, title, titleAr,
+         status, requestedDate, expiryDate, metadata)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, '{}')
+    `).run(
+      documentId,
+      parseInt(userId, 10),
+      userName || 'Utilisateur',
+      type,
+      typeArMap[type] || 'وثيقة',
+      title,
+      titleAr || title,
+      now,
+      expiryDate,
     );
+
+    const created = db
+      .prepare('SELECT * FROM documents WHERE documentId = ?')
+      .get(documentId) as any;
+    created.metadata = parseJson(created.metadata, {});
+
+    return NextResponse.json({ success: true, document: created }, { status: 201 });
   } catch (error) {
     console.error('Error creating document request:', error);
-    return NextResponse.json(
-      { error: 'Failed to create document request' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to create document request' }, { status: 500 });
   }
 }
 
@@ -104,57 +113,50 @@ export async function PUT(request: NextRequest) {
     const { documentId, action, status, fileUrl, metadata } = body;
 
     if (!documentId || !action) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    const db = await getDb();
-    const document = await db
-      .collection<Document>(Collections.DOCUMENTS)
-      .findOne({ documentId });
+    const db = getDb();
 
-    if (!document) {
-      return NextResponse.json(
-        { error: 'Document not found' },
-        { status: 404 }
-      );
+    const existing = db
+      .prepare('SELECT * FROM documents WHERE documentId = ?')
+      .get(documentId) as any;
+
+    if (!existing) {
+      return NextResponse.json({ error: 'Document not found' }, { status: 404 });
     }
 
-    let updateData: any = {};
+    const now = new Date().toISOString();
 
     if (action === 'updateStatus' && status) {
-      updateData.status = status;
       if (status === 'available') {
-        updateData.processedDate = new Date();
+        db.prepare(
+          'UPDATE documents SET status=?, processedDate=? WHERE documentId=?',
+        ).run(status, now, documentId);
+      } else {
+        db.prepare('UPDATE documents SET status=? WHERE documentId=?').run(status, documentId);
       }
     } else if (action === 'uploadFile' && fileUrl) {
-      updateData.fileUrl = fileUrl;
-      updateData.status = 'available';
-      updateData.processedDate = new Date();
+      db.prepare(
+        "UPDATE documents SET fileUrl=?, status='available', processedDate=? WHERE documentId=?",
+      ).run(fileUrl, now, documentId);
     } else if (action === 'updateMetadata' && metadata) {
-      updateData.metadata = { ...document.metadata, ...metadata };
+      const current = parseJson(existing.metadata, {});
+      const merged = { ...current, ...metadata };
+      db.prepare('UPDATE documents SET metadata=? WHERE documentId=?').run(
+        JSON.stringify(merged),
+        documentId,
+      );
     }
 
-    await db
-      .collection<Document>(Collections.DOCUMENTS)
-      .updateOne(
-        { documentId },
-        { $set: updateData }
-      );
-
-    const updated = await db
-      .collection<Document>(Collections.DOCUMENTS)
-      .findOne({ documentId });
+    const updated = db
+      .prepare('SELECT * FROM documents WHERE documentId = ?')
+      .get(documentId) as any;
+    updated.metadata = parseJson(updated.metadata, {});
 
     return NextResponse.json({ success: true, document: updated });
   } catch (error) {
     console.error('Error updating document:', error);
-    return NextResponse.json(
-      { error: 'Failed to update document' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to update document' }, { status: 500 });
   }
 }
-

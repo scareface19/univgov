@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Collections } from '@/lib/mongodb';
-import { Forum } from '@/lib/types';
-import { ObjectId } from 'mongodb';
+import { getDb, parseJson, toJson } from '@/lib/db';
 
 // GET - Liste des forums avec filtres
 export async function GET(request: NextRequest) {
@@ -10,50 +8,51 @@ export async function GET(request: NextRequest) {
     const category = searchParams.get('category');
     const search = searchParams.get('search');
 
-    const db = await getDb();
-    const query: any = {};
-    
-    if (category) query.category = category;
+    const db = getDb();
+
+    let sql = 'SELECT * FROM forums';
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (category) {
+      conditions.push('category = ?');
+      params.push(category);
+    }
     if (search) {
-      query.$or = [
-        { title: { $regex: search, $options: 'i' } },
-        { titleAr: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } },
-      ];
+      conditions.push('(title LIKE ? OR titleAr LIKE ? OR description LIKE ?)');
+      const likeVal = `%${search}%`;
+      params.push(likeVal, likeVal, likeVal);
     }
 
-    const forums = await db
-      .collection<Forum>(Collections.FORUMS)
-      .find(query)
-      .sort({ lastActivity: -1 })
-      .toArray();
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+    sql += ' ORDER BY lastActivity DESC';
 
-    // Pour chaque forum, calculer le nombre réel de posts et participants uniques
-    const forumsWithStats = await Promise.all(
-      forums.map(async (forum) => {
-        const postsCount = await db
-          .collection(Collections.FORUM_POSTS)
-          .countDocuments({ forumId: forum._id!.toString() });
+    const forums = db.prepare(sql).all(...params) as Record<string, unknown>[];
 
-        const uniqueParticipants = await db
-          .collection(Collections.FORUM_POSTS)
-          .distinct('authorId', { forumId: forum._id!.toString() });
+    const forumsWithStats = forums.map((forum) => {
+      const postsCountRow = db
+        .prepare('SELECT COUNT(*) as c FROM forum_posts WHERE forumId = ?')
+        .get(forum.id) as { c: number };
 
-        return {
-          ...forum,
-          postsCount,
-          participants: uniqueParticipants.length,
-        };
-      })
-    );
+      const authorRows = db
+        .prepare('SELECT authorId FROM forum_posts WHERE forumId = ?')
+        .all(forum.id) as { authorId: number }[];
+      const uniqueAuthorIds = new Set(authorRows.map((r) => r.authorId));
 
-    return NextResponse.json(forumsWithStats);
+      return {
+        ...forum,
+        participants: parseJson(forum.participants as string, []),
+        postsCount: postsCountRow.c,
+        membersCount: uniqueAuthorIds.size,
+      };
+    });
+
+    return NextResponse.json({ success: true, forums: forumsWithStats });
   } catch (error) {
     console.error('Error fetching forums:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch forums' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch forums' }, { status: 500 });
   }
 }
 
@@ -64,55 +63,56 @@ export async function POST(request: NextRequest) {
     const { title, titleAr, description, category, authorId, authorName } = body;
 
     if (!title || !description || !category || !authorId) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    const db = await getDb();
-    
-    const newForum: Forum = {
-      title,
-      titleAr: titleAr || title,
-      description,
-      category,
-      authorId,
-      authorName: authorName || 'Utilisateur',
-      participants: [authorId],
-      postsCount: 0,
-      lastActivity: new Date(),
-      createdAt: new Date(),
-    };
+    const db = getDb();
+    const now = new Date().toISOString();
 
-    const result = await db
-      .collection<Forum>(Collections.FORUMS)
-      .insertOne(newForum);
+    const result = db
+      .prepare(
+        `INSERT INTO forums (title, titleAr, description, category, authorId, authorName, participants, postsCount, lastActivity, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
+      )
+      .run(
+        title,
+        titleAr || title,
+        description,
+        category,
+        authorId,
+        authorName || 'Utilisateur',
+        toJson([authorId]),
+        now,
+        now
+      );
+
+    const forum = db
+      .prepare('SELECT * FROM forums WHERE id = ?')
+      .get(result.lastInsertRowid) as Record<string, unknown>;
 
     // Award points for creating forum
     try {
-      await fetch(`${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/api/gamification/points`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: authorId,
-          action: 'forum_post',
-          points: 15,
-        }),
-      });
+      await fetch(
+        `${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/api/gamification/points`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: authorId, action: 'forum_post', points: 15 }),
+        }
+      );
     } catch (error) {
       console.error('Error awarding points:', error);
     }
 
     return NextResponse.json(
-      { success: true, forum: { ...newForum, _id: result.insertedId } },
+      {
+        success: true,
+        forum: { ...forum, participants: parseJson(forum.participants as string, []) },
+      },
       { status: 201 }
     );
   } catch (error) {
     console.error('Error creating forum:', error);
-    return NextResponse.json(
-      { error: 'Failed to create forum' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to create forum' }, { status: 500 });
   }
 }

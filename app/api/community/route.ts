@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Collections } from '@/lib/mongodb';
-import { CommunityPost } from '@/lib/types';
+import { getDb, parseJson, toJson } from '@/lib/db';
 
 export async function GET(request: NextRequest) {
   try {
@@ -8,22 +7,37 @@ export async function GET(request: NextRequest) {
     const type = searchParams.get('type');
     const tag = searchParams.get('tag');
 
-    const db = await getDb();
-    const query: any = {};
-    if (type) query.type = type;
-    if (tag) query.tags = tag;
-    
-    const posts = await db
-      .collection<CommunityPost>(Collections.COMMUNITY_POSTS)
-      .find(query)
-      .sort({ createdAt: -1 })
-      .limit(50)
-      .toArray();
+    const db = getDb();
+    const conditions: string[] = [];
+    const params: any[] = [];
 
-    return NextResponse.json(posts);
+    if (type) {
+      conditions.push('type = ?');
+      params.push(type);
+    }
+
+    const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+    let rows = db
+      .prepare(`SELECT * FROM community_posts ${where} ORDER BY createdAt DESC LIMIT 50`)
+      .all(...params) as any[];
+
+    // Parse JSON fields before tag filtering
+    let posts = rows.map((row) => ({
+      ...row,
+      tags: parseJson(row.tags, []),
+      attachments: parseJson(row.attachments, []),
+      comments: parseJson(row.comments, []),
+    }));
+
+    // Filter by tag in JS after JSON parse
+    if (tag) {
+      posts = posts.filter((p) => Array.isArray(p.tags) && p.tags.includes(tag));
+    }
+
+    return NextResponse.json({ success: true, posts });
   } catch (error) {
     return NextResponse.json(
-      { error: 'Failed to fetch posts' },
+      { success: false, error: 'Failed to fetch posts' },
       { status: 500 }
     );
   }
@@ -32,27 +46,48 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const db = await getDb();
-    
-    const newPost: CommunityPost = {
-      ...body,
-      likes: 0,
-      comments: [],
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
+    const { authorId, content, contentAr, type, tags, attachments } = body;
 
-    const result = await db
-      .collection<CommunityPost>(Collections.COMMUNITY_POSTS)
-      .insertOne(newPost);
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    const result = db
+      .prepare(
+        `INSERT INTO community_posts
+          (authorId, content, contentAr, type, tags, attachments, likes, comments, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`
+      )
+      .run(
+        Number(authorId),
+        content ?? null,
+        contentAr ?? null,
+        type ?? null,
+        toJson(tags ?? []),
+        toJson(attachments ?? []),
+        toJson([]),
+        now,
+        now
+      );
+
+    const created = db
+      .prepare('SELECT * FROM community_posts WHERE id = ?')
+      .get(result.lastInsertRowid) as any;
 
     return NextResponse.json(
-      { id: result.insertedId },
+      {
+        success: true,
+        post: {
+          ...created,
+          tags: parseJson(created.tags, []),
+          attachments: parseJson(created.attachments, []),
+          comments: parseJson(created.comments, []),
+        },
+      },
       { status: 201 }
     );
   } catch (error) {
     return NextResponse.json(
-      { error: 'Failed to create post' },
+      { success: false, error: 'Failed to create post' },
       { status: 500 }
     );
   }

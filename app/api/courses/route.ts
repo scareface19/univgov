@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Collections } from '@/lib/mongodb';
-import { Course } from '@/lib/types';
+import { getDb, parseJson, toJson } from '@/lib/db';
 
 export async function GET(request: NextRequest) {
   try {
@@ -8,20 +7,32 @@ export async function GET(request: NextRequest) {
     const faculty = searchParams.get('faculty');
     const semester = searchParams.get('semester');
 
-    const db = await getDb();
-    const query: any = {};
-    if (faculty) query.faculty = faculty;
-    if (semester) query.semester = semester;
-    
-    const courses = await db
-      .collection<Course>(Collections.COURSES)
-      .find(query)
-      .toArray();
+    const db = getDb();
+    const conditions: string[] = [];
+    const params: any[] = [];
 
-    return NextResponse.json(courses);
+    if (faculty) {
+      conditions.push('faculty = ?');
+      params.push(faculty);
+    }
+    if (semester) {
+      conditions.push('semester = ?');
+      params.push(semester);
+    }
+
+    const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+    const rows = db.prepare(`SELECT * FROM courses ${where}`).all(...params) as any[];
+
+    const courses = rows.map((row) => ({
+      ...row,
+      schedule: parseJson(row.schedule, null),
+      prerequisites: parseJson(row.prerequisites, []),
+    }));
+
+    return NextResponse.json({ success: true, courses });
   } catch (error) {
     return NextResponse.json(
-      { error: 'Failed to fetch courses' },
+      { success: false, error: 'Failed to fetch courses' },
       { status: 500 }
     );
   }
@@ -30,25 +41,65 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const db = await getDb();
-    
-    const newCourse: Course = {
-      ...body,
-      enrolled: 0,
-      createdAt: new Date(),
-    };
+    const {
+      courseCode,
+      courseName,
+      courseNameAr,
+      credits,
+      faculty,
+      department,
+      semester,
+      professorId,
+      capacity,
+      schedule,
+      description,
+      prerequisites,
+    } = body;
 
-    const result = await db
-      .collection<Course>(Collections.COURSES)
-      .insertOne(newCourse);
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    const result = db
+      .prepare(
+        `INSERT INTO courses
+          (courseCode, courseName, courseNameAr, credits, faculty, department, semester,
+           professorId, capacity, enrolled, schedule, description, prerequisites, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`
+      )
+      .run(
+        courseCode,
+        courseName,
+        courseNameAr ?? null,
+        credits ?? null,
+        faculty ?? null,
+        department ?? null,
+        semester ?? null,
+        professorId ?? null,
+        capacity ?? null,
+        toJson(schedule),
+        description ?? null,
+        toJson(prerequisites),
+        now
+      );
+
+    const created = db
+      .prepare('SELECT * FROM courses WHERE id = ?')
+      .get(result.lastInsertRowid) as any;
 
     return NextResponse.json(
-      { id: result.insertedId },
+      {
+        success: true,
+        course: {
+          ...created,
+          schedule: parseJson(created.schedule, null),
+          prerequisites: parseJson(created.prerequisites, []),
+        },
+      },
       { status: 201 }
     );
   } catch (error) {
     return NextResponse.json(
-      { error: 'Failed to create course' },
+      { success: false, error: 'Failed to create course' },
       { status: 500 }
     );
   }

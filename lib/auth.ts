@@ -1,8 +1,7 @@
 import { NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import bcrypt from 'bcryptjs';
-import { getDb, Collections } from './mongodb';
-import { User } from './types';
+import { getDb, parseJson } from '@/lib/db';
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -20,10 +19,8 @@ export const authOptions: NextAuthOptions = {
           }
 
           console.log(`[AUTH] Tentative de connexion pour: ${credentials.email}`);
-          const db = await getDb();
-          const user = await db
-            .collection<User>(Collections.USERS)
-            .findOne({ email: credentials.email });
+          const db = getDb();
+          const user = db.prepare('SELECT * FROM users WHERE email = ?').get(credentials.email) as any;
 
           if (!user) {
             console.error(`[AUTH] User not found: ${credentials.email}`);
@@ -54,14 +51,16 @@ export const authOptions: NextAuthOptions = {
             return null;
           }
 
+          const permissions = parseJson(user.permissions, []);
+
           console.log(`[AUTH] Authentication successful for: ${credentials.email}`);
           return {
-            id: user._id!.toString(),
+            id: user.id.toString(),
             email: user.email,
             name: `${user.firstName} ${user.lastName}`,
             role: user.role,
             digitalId: user.digitalId,
-            permissions: user.permissions,
+            permissions,
           };
         } catch (error: any) {
           console.error('[AUTH] Authorize error:', error.message);

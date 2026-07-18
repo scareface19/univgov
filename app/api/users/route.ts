@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Collections } from '@/lib/mongodb';
-import { User } from '@/lib/types';
+import { getDb, parseJson, toJson } from '@/lib/db';
 import bcrypt from 'bcryptjs';
 
 export async function GET(request: NextRequest) {
@@ -8,16 +7,18 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const role = searchParams.get('role');
 
-    const db = await getDb();
-    const query: any = role ? { role: role as User['role'] } : {};
-    
-    const users = await db
-      .collection<User>(Collections.USERS)
-      .find(query)
-      .project({ password: 0 })
-      .toArray();
+    const db = getDb();
+    const rows: any[] = role
+      ? db.prepare('SELECT * FROM users WHERE role = ?').all(role)
+      : db.prepare('SELECT * FROM users').all();
 
-    return NextResponse.json(users);
+    const users = rows.map(({ password: _password, ...user }) => ({
+      ...user,
+      permissions: parseJson(user.permissions, []),
+      isActive: Boolean(user.isActive),
+    }));
+
+    return NextResponse.json({ success: true, users });
   } catch (error) {
     return NextResponse.json(
       { error: 'Failed to fetch users' },
@@ -29,15 +30,12 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { email, password, role, firstName, lastName, ...rest } = body;
+    const { email, password, role, firstName, lastName, department, avatar } = body;
 
-    const db = await getDb();
-    
+    const db = getDb();
+
     // Check if user already exists
-    const existingUser = await db
-      .collection<User>(Collections.USERS)
-      .findOne({ email });
-
+    const existingUser = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
     if (existingUser) {
       return NextResponse.json(
         { error: 'User already exists' },
@@ -55,7 +53,6 @@ export async function POST(request: NextRequest) {
     let permissions: string[] = [];
     switch (role) {
       case 'student':
-        // Pour le compte démo, utiliser les mêmes permissions que dans le script
         if (email === 'demo@unigov.dz') {
           permissions = ['library', 'cafeteria', 'transport', 'sports', 'health'];
         } else {
@@ -73,27 +70,41 @@ export async function POST(request: NextRequest) {
         break;
     }
 
-    // Create user
-    const newUser: User = {
+    const now = new Date().toISOString();
+
+    const result = db.prepare(
+      `INSERT INTO users (email, password, role, firstName, lastName, digitalId, department, avatar, permissions, isActive, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+    ).run(
       email,
-      password: hashedPassword,
+      hashedPassword,
       role,
       firstName,
       lastName,
       digitalId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      permissions,
-      isActive: true,
-      ...rest,
-    };
+      department ?? null,
+      avatar ?? null,
+      toJson(permissions),
+      now,
+      now
+    );
 
-    const result = await db
-      .collection<User>(Collections.USERS)
-      .insertOne(newUser);
+    const newId = result.lastInsertRowid;
+
+    const created = db.prepare('SELECT * FROM users WHERE id = ?').get(newId) as any;
+    const { password: _pw, ...userWithoutPassword } = created;
 
     return NextResponse.json(
-      { id: result.insertedId, digitalId },
+      {
+        success: true,
+        user: {
+          ...userWithoutPassword,
+          permissions: parseJson(userWithoutPassword.permissions, []),
+          isActive: Boolean(userWithoutPassword.isActive),
+        },
+        id: newId.toString(),
+        digitalId,
+      },
       { status: 201 }
     );
   } catch (error) {

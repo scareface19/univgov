@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Collections } from '@/lib/mongodb';
-import { Enrollment } from '@/lib/types';
-import { ObjectId } from 'mongodb';
+import { getDb } from '@/lib/db';
 
 export async function GET(request: NextRequest) {
   try {
@@ -9,20 +7,28 @@ export async function GET(request: NextRequest) {
     const studentId = searchParams.get('studentId');
     const courseId = searchParams.get('courseId');
 
-    const db = await getDb();
-    const query: any = {};
-    if (studentId) query.studentId = studentId;
-    if (courseId) query.courseId = courseId;
-    
-    const enrollments = await db
-      .collection<Enrollment>(Collections.ENROLLMENTS)
-      .find(query)
-      .toArray();
+    const db = getDb();
+    const conditions: string[] = [];
+    const params: any[] = [];
 
-    return NextResponse.json(enrollments);
+    if (studentId) {
+      conditions.push('studentId = ?');
+      params.push(Number(studentId));
+    }
+    if (courseId) {
+      conditions.push('courseId = ?');
+      params.push(Number(courseId));
+    }
+
+    const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+    const enrollments = db
+      .prepare(`SELECT * FROM enrollments ${where}`)
+      .all(...params) as any[];
+
+    return NextResponse.json({ success: true, enrollments });
   } catch (error) {
     return NextResponse.json(
-      { error: 'Failed to fetch enrollments' },
+      { success: false, error: 'Failed to fetch enrollments' },
       { status: 500 }
     );
   }
@@ -33,60 +39,62 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { studentId, courseId } = body;
 
-    const db = await getDb();
-    
-    // Check if already enrolled
-    const existing = await db
-      .collection<Enrollment>(Collections.ENROLLMENTS)
-      .findOne({ studentId, courseId });
+    const db = getDb();
+
+    // Check for duplicate enrollment
+    const existing = db
+      .prepare('SELECT id FROM enrollments WHERE studentId = ? AND courseId = ?')
+      .get(Number(studentId), Number(courseId));
 
     if (existing) {
       return NextResponse.json(
-        { error: 'Already enrolled in this course' },
-        { status: 400 }
+        { success: false, error: 'Already enrolled' },
+        { status: 409 }
       );
     }
 
-    // Check course capacity
-    const course = await db
-      .collection(Collections.COURSES)
-      .findOne({ _id: new ObjectId(courseId) });
+    // Check course existence and capacity
+    const course = db
+      .prepare('SELECT capacity, enrolled FROM courses WHERE id = ?')
+      .get(Number(courseId)) as { capacity: number; enrolled: number } | undefined;
 
-    if (course && course.enrolled >= course.capacity) {
+    if (!course) {
       return NextResponse.json(
-        { error: 'Course is full' },
+        { success: false, error: 'Course not found' },
+        { status: 404 }
+      );
+    }
+
+    if (course.enrolled >= course.capacity) {
+      return NextResponse.json(
+        { success: false, error: 'Course is full' },
         { status: 400 }
       );
     }
 
-    // Create enrollment
-    const newEnrollment: Enrollment = {
-      studentId,
-      courseId,
-      enrollmentDate: new Date(),
-      status: 'enrolled',
-      attendance: 0,
-    };
+    const now = new Date().toISOString();
 
-    const result = await db
-      .collection<Enrollment>(Collections.ENROLLMENTS)
-      .insertOne(newEnrollment);
+    // Insert enrollment
+    const result = db
+      .prepare(
+        `INSERT INTO enrollments (studentId, courseId, enrollmentDate, status, attendance)
+         VALUES (?, ?, ?, 'enrolled', 0)`
+      )
+      .run(Number(studentId), Number(courseId), now);
 
-    // Update course enrolled count
-    await db
-      .collection(Collections.COURSES)
-      .updateOne(
-        { _id: new ObjectId(courseId) },
-        { $inc: { enrolled: 1 } }
-      );
-
-    return NextResponse.json(
-      { id: result.insertedId },
-      { status: 201 }
+    // Increment course enrolled count
+    db.prepare('UPDATE courses SET enrolled = enrolled + 1 WHERE id = ?').run(
+      Number(courseId)
     );
+
+    const enrollment = db
+      .prepare('SELECT * FROM enrollments WHERE id = ?')
+      .get(result.lastInsertRowid) as any;
+
+    return NextResponse.json({ success: true, enrollment }, { status: 201 });
   } catch (error) {
     return NextResponse.json(
-      { error: 'Failed to create enrollment' },
+      { success: false, error: 'Failed to create enrollment' },
       { status: 500 }
     );
   }

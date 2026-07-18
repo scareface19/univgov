@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Collections } from '@/lib/mongodb';
-import { Payment } from '@/lib/types';
+import { getDb } from '@/lib/db';
 
 export async function GET(request: NextRequest) {
   try {
@@ -8,49 +7,55 @@ export async function GET(request: NextRequest) {
     const userId = searchParams.get('userId');
     const status = searchParams.get('status');
 
-    const db = await getDb();
-    const query: any = {};
-    if (userId) query.userId = userId;
-    if (status) query.status = status;
-    
-    const payments = await db
-      .collection<Payment>(Collections.PAYMENTS)
-      .find(query)
-      .sort({ createdAt: -1 })
-      .toArray();
+    const db = getDb();
 
+    let query = 'SELECT * FROM payments WHERE 1=1';
+    const params: (string | number)[] = [];
+
+    if (userId) {
+      query += ' AND userId=?';
+      params.push(parseInt(userId));
+    }
+    if (status) {
+      query += ' AND status=?';
+      params.push(status);
+    }
+    query += ' ORDER BY createdAt DESC';
+
+    const payments = db.prepare(query).all(...params) as any[];
     return NextResponse.json(payments);
   } catch (error) {
-    return NextResponse.json(
-      { error: 'Failed to fetch payments' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch payments' }, { status: 500 });
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const db = await getDb();
-    
-    const newPayment: Payment = {
-      ...body,
-      status: 'pending',
-      createdAt: new Date(),
-    };
+    const db = getDb();
 
-    const result = await db
-      .collection<Payment>(Collections.PAYMENTS)
-      .insertOne(newPayment);
+    const now = new Date().toISOString();
+    const result = db
+      .prepare(
+        'INSERT INTO payments (userId, amount, type, status, paymentMethod, transactionId, description, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      )
+      .run(
+        body.userId ? parseInt(body.userId) : null,
+        body.amount ?? null,
+        body.type ?? null,
+        'pending',
+        body.paymentMethod ?? null,
+        body.transactionId ?? null,
+        body.description ?? null,
+        now
+      );
 
-    return NextResponse.json(
-      { id: result.insertedId },
-      { status: 201 }
-    );
+    const payment = db
+      .prepare('SELECT * FROM payments WHERE id=?')
+      .get(result.lastInsertRowid) as any;
+
+    return NextResponse.json(payment, { status: 201 });
   } catch (error) {
-    return NextResponse.json(
-      { error: 'Failed to create payment' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to create payment' }, { status: 500 });
   }
 }

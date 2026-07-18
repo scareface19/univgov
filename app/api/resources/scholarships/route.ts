@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Collections } from '@/lib/mongodb';
-import { Scholarship } from '@/lib/types';
-import { ObjectId } from 'mongodb';
+import { getDb } from '@/lib/db';
 
 // GET - Liste des bourses avec filtres
 export async function GET(request: NextRequest) {
@@ -11,22 +9,29 @@ export async function GET(request: NextRequest) {
     const type = searchParams.get('type');
     const studentId = searchParams.get('studentId');
 
-    const db = await getDb();
-    const query: any = {};
-    
-    if (status) query.status = status;
-    if (type) query.type = type;
-    if (studentId) query.studentId = studentId;
+    const db = getDb();
 
-    const scholarships = await db
-      .collection<Scholarship>(Collections.SCHOLARSHIPS)
-      .find(query)
-      .sort({ createdAt: -1 })
-      .toArray();
+    let query = 'SELECT * FROM scholarships WHERE 1=1';
+    const params: (string | number)[] = [];
 
-    // Calculer le résumé
+    if (status) {
+      query += ' AND status=?';
+      params.push(status);
+    }
+    if (type) {
+      query += ' AND type=?';
+      params.push(type);
+    }
+    if (studentId) {
+      query += ' AND studentId=?';
+      params.push(parseInt(studentId));
+    }
+    query += ' ORDER BY createdAt DESC';
+
+    const scholarships = db.prepare(query).all(...params) as any[];
+
     const summary = {
-      total: scholarships.reduce((sum, s) => sum + s.amount, 0),
+      total: scholarships.reduce((sum, s) => sum + (s.amount || 0), 0),
       disbursed: scholarships.reduce((sum, s) => sum + (s.disbursedAmount || 0), 0),
       pending: scholarships.filter(s => s.status === 'pending').length,
       active: scholarships.filter(s => s.status === 'active').length,
@@ -36,10 +41,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ scholarships, summary });
   } catch (error) {
     console.error('Error fetching scholarships:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch scholarships' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch scholarships' }, { status: 500 });
   }
 }
 
@@ -47,26 +49,13 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const {
-      studentId,
-      studentName,
-      amount,
-      type,
-      semester,
-      academicYear,
-      criteria,
-      startDate,
-      endDate,
-    } = body;
+    const { studentId, studentName, amount, type, semester, academicYear, criteria, startDate, endDate } = body;
 
     if (!studentId || !amount || !type) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    const db = await getDb();
+    const db = getDb();
 
     const typeArMap: Record<string, string> = {
       'Excellence': 'التميز',
@@ -74,76 +63,75 @@ export async function POST(request: NextRequest) {
       'Sociale': 'اجتماعية',
     };
 
-    const newScholarship: Scholarship = {
-      studentId,
-      studentName: studentName || 'Étudiant',
-      amount: Number(amount),
-      type,
-      typeAr: typeArMap[type] || type,
-      status: 'pending',
-      semester: semester || 'S1',
-      academicYear: academicYear || `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`,
-      criteria: criteria || {},
-      disbursedAmount: 0,
-      startDate: startDate ? new Date(startDate) : new Date(),
-      endDate: endDate ? new Date(endDate) : new Date(),
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
+    const now = new Date().toISOString();
+    const currentYear = new Date().getFullYear();
 
-    const result = await db
-      .collection<Scholarship>(Collections.SCHOLARSHIPS)
-      .insertOne(newScholarship);
+    const result = db
+      .prepare(
+        'INSERT INTO scholarships (studentId, studentName, amount, type, typeAr, status, semester, academicYear, criteria, disbursedAmount, startDate, endDate, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      )
+      .run(
+        parseInt(studentId),
+        studentName || 'Étudiant',
+        Number(amount),
+        type,
+        typeArMap[type] || type,
+        'pending',
+        semester || 'S1',
+        academicYear || `${currentYear}-${currentYear + 1}`,
+        criteria ? JSON.stringify(criteria) : '{}',
+        0,
+        startDate || now,
+        endDate || now,
+        now,
+        now
+      );
 
-    return NextResponse.json(
-      { success: true, scholarship: { ...newScholarship, _id: result.insertedId } },
-      { status: 201 }
-    );
+    const scholarship = db
+      .prepare('SELECT * FROM scholarships WHERE id=?')
+      .get(result.lastInsertRowid) as any;
+
+    return NextResponse.json({ success: true, scholarship }, { status: 201 });
   } catch (error) {
     console.error('Error creating scholarship:', error);
-    return NextResponse.json(
-      { error: 'Failed to create scholarship' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to create scholarship' }, { status: 500 });
   }
 }
 
 // PUT - Mettre à jour une bourse
 export async function PUT(request: NextRequest) {
   try {
+    const scholarshipId = request.nextUrl.searchParams.get('scholarshipId');
     const body = await request.json();
-    const { scholarshipId, status, disbursedAmount } = body;
+    const { status, disbursedAmount } = body;
 
     if (!scholarshipId) {
-      return NextResponse.json(
-        { error: 'scholarshipId is required' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'scholarshipId is required' }, { status: 400 });
     }
 
-    const db = await getDb();
-    const updateData: any = { updatedAt: new Date() };
+    const db = getDb();
+    const now = new Date().toISOString();
+    const id = parseInt(scholarshipId);
 
-    if (status) updateData.status = status;
-    if (disbursedAmount !== undefined) updateData.disbursedAmount = disbursedAmount;
+    const setClauses: string[] = ['updatedAt=?'];
+    const params: (string | number)[] = [now];
 
-    await db
-      .collection<Scholarship>(Collections.SCHOLARSHIPS)
-      .updateOne(
-        { _id: new ObjectId(scholarshipId) },
-        { $set: updateData }
-      );
+    if (status) {
+      setClauses.push('status=?');
+      params.push(status);
+    }
+    if (disbursedAmount !== undefined) {
+      setClauses.push('disbursedAmount=?');
+      params.push(disbursedAmount);
+    }
+    params.push(id);
 
-    const updated = await db
-      .collection<Scholarship>(Collections.SCHOLARSHIPS)
-      .findOne({ _id: new ObjectId(scholarshipId) });
+    db.prepare(`UPDATE scholarships SET ${setClauses.join(', ')} WHERE id=?`).run(...params);
 
+    const updated = db.prepare('SELECT * FROM scholarships WHERE id=?').get(id) as any;
     return NextResponse.json({ success: true, scholarship: updated });
   } catch (error) {
     console.error('Error updating scholarship:', error);
-    return NextResponse.json(
-      { error: 'Failed to update scholarship' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to update scholarship' }, { status: 500 });
   }
 }

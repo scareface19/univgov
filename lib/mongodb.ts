@@ -1,29 +1,32 @@
 import { MongoClient, Db } from 'mongodb';
 
-if (!process.env.MONGODB_URI) {
-  throw new Error('Invalid/Missing environment variable: "MONGODB_URI"');
+declare global {
+  var _mongoClientPromise: Promise<MongoClient> | undefined;
 }
 
-const uri = process.env.MONGODB_URI;
-const options = {};
+let _clientPromise: Promise<MongoClient> | null = null;
 
-let client: MongoClient;
-let clientPromise: Promise<MongoClient>;
-
-if (process.env.NODE_ENV === 'development') {
-  let globalWithMongo = global as typeof globalThis & {
-    _mongoClientPromise?: Promise<MongoClient>;
-  };
-
-  if (!globalWithMongo._mongoClientPromise) {
-    client = new MongoClient(uri, options);
-    globalWithMongo._mongoClientPromise = client.connect();
+function createClientPromise(): Promise<MongoClient> {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    throw new Error('Invalid/Missing environment variable: "MONGODB_URI"');
   }
-  clientPromise = globalWithMongo._mongoClientPromise;
-} else {
-  client = new MongoClient(uri, options);
-  clientPromise = client.connect();
+  if (process.env.NODE_ENV === 'development') {
+    if (!global._mongoClientPromise) {
+      global._mongoClientPromise = new MongoClient(uri).connect();
+    }
+    return global._mongoClientPromise;
+  }
+  return new MongoClient(uri).connect();
 }
+
+// Lazy proxy so the module can be imported at build time without MONGODB_URI
+const clientPromise = new Proxy({} as Promise<MongoClient>, {
+  get(_target, prop) {
+    const promise = _clientPromise ?? (_clientPromise = createClientPromise());
+    return (promise as any)[prop];
+  },
+});
 
 export default clientPromise;
 
